@@ -9,6 +9,9 @@
 
 // Forward declaration(s)
 String longToHex(long val);
+// Forward declarations for web debug assets
+String frameJson();
+extern const char DEBUG_PAGE[] PROGMEM;
 
 // ==== Constants for Modes ====
 enum ModeType { MODE_TEXT = 0, MODE_LIGHTING = 1 };
@@ -16,11 +19,10 @@ enum TextSubMode { TEXT_SCROLL_STATIC = 0, TEXT_SCROLL_RAINBOW = 1 };
 enum LightingSubMode {
   LIGHTING_RAINBOW_CYCLE = 0,
   LIGHTING_SPARKLE = 1,
-  LIGHTING_COLOR_WIPE = 2,
-  LIGHTING_WAVE = 3,
-  LIGHTING_FIRE = 4,
-  LIGHTING_EQUALIZER = 5,
-  LIGHTING_EYE = 6
+  LIGHTING_WAVE = 2,
+  LIGHTING_FIRE = 3,
+  LIGHTING_EQUALIZER = 4,
+  LIGHTING_EYE = 5
 };
 
 // ==== LED Matrix Config ====
@@ -180,58 +182,92 @@ uint16_t Wheel(byte pos) {
   pos -= 170; return matrix.Color(pos * 3, 255 - pos * 3, 0);
 }
 
-// ==== HTML Page (stored in flash to save RAM) ====
-const char HTML_PAGE[] PROGMEM = R"rawliteral(
-<!DOCTYPE html><html><head>
-<meta name='viewport' content='width=device-width,initial-scale=1'>
-<style>body{background:#111;color:#eee;font-family:sans-serif;text-align:center;}
-button,select,input{padding:10px;margin:8px;width:85%;max-width:320px;border:none;border-radius:5px;}
-button{background:#2196F3;color:#fff;}</style></head><body>
-<h2>ESP32 LED Matrix Controller</h2>
-<form action='/set'>
-<label>Mode Type:</label><select name='type' onchange='this.form.submit()'>
-<option value='0'{MODE_TEXT_SELECTED}>Text Display</option>
-<option value='1'{MODE_LIGHTING_SELECTED}>Lighting Effects</option>
-</select><br>
-<label>Sub Mode:</label><select name='sub'>{SUBMODE_OPTIONS}</select><br>
-<label>Brightness:</label><input type='range' name='bright' min='1' max='255' value='{BRIGHTNESS}'><br>
-<label>Text Speed (Delay):</label><input type='range' name='txtspd' min='10' max='150' value='{TEXT_SPEED}'><br>
-<label>Effect Speed (Delay):</label><input type='range' name='effspd' min='10' max='150' value='{EFFECT_SPEED}'><br>
-{TEXT_CONTROLS}
-<button type='submit'>Apply</button></form></body></html>
-)rawliteral";
+// ==== Serial Matrix Simulation (ASCII/ANSI color) ====
+#define ENABLE_SERIAL_SIM 0
+#define ENABLE_SERIAL_ANSI 1  // set to 0 if ANSI colors are not supported by your terminal
 
-String makePage() {
-  String page = FPSTR(HTML_PAGE);
-  page.replace("{MODE_TEXT_SELECTED}", (modeType == MODE_TEXT) ? " selected" : "");
-  page.replace("{MODE_LIGHTING_SELECTED}", (modeType == MODE_LIGHTING) ? " selected" : "");
+// Map (x,y) to underlying NeoPixel linear index for
+// NEO_MATRIX_BOTTOM + NEO_MATRIX_RIGHT + NEO_MATRIX_ROWS + NEO_MATRIX_ZIGZAG
+uint16_t xyIndex(int x, int y) {
+  // Flip for RIGHT and BOTTOM orientation
+  int ux = (MATRIX_WIDTH - 1) - x;   // RIGHT
+  int uy = (MATRIX_HEIGHT - 1) - y;  // BOTTOM
 
-  String subOptions;
-  if (modeType == MODE_TEXT) {
-    const char* textSub[] = {"Static Color Scroll", "Rainbow Color Scroll"};
-    for (int i = 0; i < 2; i++) {
-      subOptions += "<option value='" + String(i) + "'" + (i == subMode ? " selected" : "") + ">" + textSub[i] + "</option>";
+  // Rows layout with zigzag
+  bool reverse = (uy & 1); // odd rows reversed
+  int posInRow = reverse ? (MATRIX_WIDTH - 1 - ux) : ux;
+  return (uint16_t)(uy * MATRIX_WIDTH + posInRow);
+}
+
+void renderSimulationAnsi() {
+#if ENABLE_SERIAL_SIM && ENABLE_SERIAL_ANSI
+  static unsigned long lastSim = 0;
+  if (millis() - lastSim < 120) return; // ~8 FPS
+  lastSim = millis();
+
+  Serial.println();
+  Serial.print("Mode:"); Serial.print((modeType == MODE_TEXT) ? "TEXT" : "LIGHT");
+  Serial.print(" Sub:"); Serial.print(subMode);
+  Serial.print(" Bright:"); Serial.print(brightness);
+  Serial.print(" TSpd:"); Serial.print(textScrollSpeed);
+  Serial.print(" ESpd:"); Serial.println(effectSpeed);
+  Serial.print("Text: "); Serial.println(message);
+
+  for (int y = 0; y < MATRIX_HEIGHT; y++) {
+    for (int x = 0; x < MATRIX_WIDTH; x++) {
+      uint16_t idx = xyIndex(x, y);
+      uint32_t c = matrix.getPixelColor(idx);
+      uint8_t r = (c >> 16) & 0xFF;
+      uint8_t g = (c >> 8) & 0xFF;
+      uint8_t b = (c) & 0xFF;
+      // ANSI 24-bit background color: ESC[48;2;R;G;Bm
+      Serial.print("\x1b[48;2;");
+      Serial.print(r); Serial.print(';'); Serial.print(g); Serial.print(';'); Serial.print(b); Serial.print('m');
+      Serial.print("  "); // two spaces to look like a square
     }
-  } else {
-    const char* lightSub[] = {"Rainbow Cycle","Sparkle","Color Wipe","Wave","Fire","Equalizer","Eye Mode"};
-    for (int i = 0; i < 7; i++) {
-      subOptions += "<option value='" + String(i) + "'" + (i == subMode ? " selected" : "") + ">" + lightSub[i] + "</option>";
+    Serial.print("\x1b[0m\r\n"); // reset and newline
+  }
+#endif
+}
+
+void renderSimulationToSerial() {
+#if ENABLE_SERIAL_SIM
+  #if ENABLE_SERIAL_ANSI
+    renderSimulationAnsi();
+    return;
+  #endif
+  static unsigned long lastSim = 0;
+  if (millis() - lastSim < 120) return; // ~8 FPS
+  lastSim = millis();
+
+  const char* shades = " .:-=+*#%@"; // 10 levels
+  const int levels = 10;
+
+  Serial.println();
+  Serial.print("Mode:"); Serial.print((modeType == MODE_TEXT) ? "TEXT" : "LIGHT");
+  Serial.print(" Sub:"); Serial.print(subMode);
+  Serial.print(" Bright:"); Serial.print(brightness);
+  Serial.print(" TSpd:"); Serial.print(textScrollSpeed);
+  Serial.print(" ESpd:"); Serial.println(effectSpeed);
+  Serial.print("Text: "); Serial.println(message);
+
+  for (int y = 0; y < MATRIX_HEIGHT; y++) {
+    String line;
+    for (int x = 0; x < MATRIX_WIDTH; x++) {
+      uint16_t idx = xyIndex(x, y);
+      uint32_t c = matrix.getPixelColor(idx);
+      uint8_t r = (c >> 16) & 0xFF;
+      uint8_t g = (c >> 8) & 0xFF;
+      uint8_t b = (c) & 0xFF;
+      int sum = r + g + b; // 0..765
+      int li = (sum * (levels - 1)) / 765;
+      char ch = shades[li];
+      // Add two chars to look more square
+      line += ch; line += ch;
     }
+    Serial.println(line);
   }
-  page.replace("{SUBMODE_OPTIONS}", subOptions);
-  page.replace("{BRIGHTNESS}", String(brightness));
-  page.replace("{TEXT_SPEED}", String(textScrollSpeed));
-  page.replace("{EFFECT_SPEED}", String(effectSpeed));
-
-  if (modeType == MODE_TEXT) {
-    String controls = "<label>Text Message:</label><br><input name='msg' value='" + message + "' placeholder='Message'><br>";
-    controls += "<label>Text Color:</label><br><input type='color' name='color' value='" + colorHex + "'><br>";
-    page.replace("{TEXT_CONTROLS}", controls);
-  } else {
-    page.replace("{TEXT_CONTROLS}", "");
-  }
-
-  return page;
+#endif
 }
 
 
@@ -491,6 +527,7 @@ void setup() {
   modeType = (ModeType)preferences.getInt("type", MODE_TEXT);
   subMode = preferences.getInt("sub", 0);
 
+  // Wi-Fi for web debug UI
   WiFiManager wm;
   wm.setConfigPortalTimeout(180);
   if (!wm.autoConnect("LED_Controller")) {
@@ -506,62 +543,14 @@ void setup() {
   matrix.setBrightness(brightness);
   stripLeft.setBrightness(brightness);
   stripRight.setBrightness(brightness);
-
-  server.on("/", []() { server.send(200, "text/html", makePage()); });
-
-  server.on("/set", []() {
-    if (server.hasArg("msg")) {
-      message = server.arg("msg") + "  ";
-      preferences.putString("msg", message);
-    }
-    if (server.hasArg("txtspd")) { 
-      textScrollSpeed = constrain(server.arg("txtspd").toInt(), 10, 150);
-      preferences.putInt("txtspd", textScrollSpeed); 
-    }
-    if (server.hasArg("effspd")) { 
-      effectSpeed = constrain(server.arg("effspd").toInt(), 10, 150);
-      preferences.putInt("effspd", effectSpeed); 
-    }
-
-    if (server.hasArg("bright")) {
-      brightness = constrain(server.arg("bright").toInt(), 1, 255);
-      matrix.setBrightness(brightness);
-      // CORRECTED LINES 372 & 375: Pass brightness directly.
-      stripLeft.setBrightness(brightness);  // Line 372
-      stripRight.setBrightness(brightness); // Line 375
-      preferences.putInt("bright", brightness);
-    }
-    if (server.hasArg("color")) {
-      colorHex = server.arg("color");
-      long colorVal = strtol(colorHex.substring(1).c_str(), NULL, 16);
-      uint8_t r = (colorVal >> 16) & 0xFF;
-      uint8_t g = (colorVal >> 8) & 0xFF;
-      uint8_t b = (colorVal) & 0xFF;
-      textColor = matrix.Color(r, g, b);
-      preferences.putLong("color", colorVal);
-    }
-    if (server.hasArg("type")) {
-      ModeType newModeType = (ModeType)server.arg("type").toInt();
-      if (newModeType != modeType) {
-        modeType = newModeType;
-        subMode = 0; // reset sub-mode when switching type
-        preferences.putInt("sub", subMode);
-      } else {
-        modeType = newModeType;
-      }
-      preferences.putInt("type", modeType);
-    }
-    if (server.hasArg("sub")) {
-      subMode = server.arg("sub").toInt();
-      preferences.putInt("sub", subMode);
-    }
-    server.sendHeader("Location", "/");
-    server.send(303);
+  // Web debug routes
+  server.on("/", [](){ server.send(200, "text/html", FPSTR(DEBUG_PAGE)); });
+  server.on("/frame", [](){
+    String j = frameJson();
+    server.send(200, "application/json", j);
   });
-
   server.begin();
-  Serial.println("Web server ready!");
-  Serial.println(WiFi.localIP());
+  Serial.print("Web debug UI at http://"); Serial.println(WiFi.localIP());
 
   // ===== BLE init =====
   NimBLEDevice::init("DaftPunkHelmet");
@@ -610,6 +599,7 @@ void setup() {
 
 // ==== LOOP (OPTIMIZED, non-blocking) ====
 void loop() {
+  // Handle web debug requests
   server.handleClient();
 
   unsigned long now = millis();
@@ -627,7 +617,6 @@ void loop() {
       switch (subMode) {
         case LIGHTING_RAINBOW_CYCLE: rainbowCycle(); break;
         case LIGHTING_SPARKLE:       sparkleEffect(); break;
-        case LIGHTING_COLOR_WIPE:    colorWipe(matrix.Color(0,150,255)); break;
         case LIGHTING_WAVE:          waveEffect(); break;
         case LIGHTING_FIRE:          fireEffect(); break;
         case LIGHTING_EQUALIZER:     drawEqualizer(); break;
@@ -637,5 +626,84 @@ void loop() {
 
     matrix.show();
     updateSideStrips();
+    #if ENABLE_SERIAL_SIM
+      renderSimulationToSerial();
+    #endif
   }
+}
+
+// ==== Web Debug Page (Color grid) ====
+const char DEBUG_PAGE[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ESP32 Matrix Debug</title>
+  <style>
+    body{background:#111;color:#eee;font-family:system-ui, sans-serif;margin:0;padding:16px}
+    #grid{display:grid;gap:2px;margin-top:12px}
+    .px{width:18px;height:18px;background:#000;border-radius:2px}
+    .hdr{opacity:.8;font-size:14px}
+    .legend{margin-top:8px;font-size:12px;opacity:.8}
+  </style>
+  <script>
+    let w=0, h=0;
+    async function refresh(){
+      try{
+        const res = await fetch('/frame');
+        const j = await res.json();
+        if (!j || !j.px) return;
+        if (w!==j.w || h!==j.h){
+          w=j.w; h=j.h;
+          const grid = document.getElementById('grid');
+          grid.style.gridTemplateColumns = `repeat(${w}, 18px)`;
+          grid.innerHTML='';
+          for(let i=0;i<w*h;i++){
+            const d=document.createElement('div'); d.className='px'; grid.appendChild(d);
+          }
+        }
+        const nodes = document.getElementById('grid').children;
+        for(let i=0;i<j.px.length && i<nodes.length;i++){
+          nodes[i].style.backgroundColor = j.px[i];
+        }
+        document.getElementById('hdr').textContent = `Mode:${j.mode} Sub:${j.sub} Bright:${j.bright} T:${j.tspd} E:${j.espd}`;
+      }catch(e){/* ignore */}
+      setTimeout(refresh, 200);
+    }
+    window.addEventListener('load', refresh);
+  </script>
+  </head>
+  <body>
+    <div class="hdr" id="hdr">Loading…</div>
+    <div id="grid"></div>
+    <div class="legend">This page auto-refreshes every ~200ms. Colors mirror the current matrix frame.</div>
+  </body>
+</html>
+)rawliteral";
+
+String frameJson() {
+  String out = "{";
+  out += "\"w\":" + String(MATRIX_WIDTH) + ",";
+  out += "\"h\":" + String(MATRIX_HEIGHT) + ",";
+  out += "\"mode\":" + String((modeType==MODE_TEXT)?0:1) + ",";
+  out += "\"sub\":" + String(subMode) + ",";
+  out += "\"bright\":" + String(brightness) + ",";
+  out += "\"tspd\":" + String(textScrollSpeed) + ",";
+  out += "\"espd\":" + String(effectSpeed) + ",";
+  out += "\"px\":[";
+  char buf[8];
+  for (int y=0; y<MATRIX_HEIGHT; y++) {
+    for (int x=0; x<MATRIX_WIDTH; x++) {
+      uint16_t idx = xyIndex(x,y);
+      uint32_t c = matrix.getPixelColor(idx);
+      uint8_t r = (c >> 16) & 0xFF;
+      uint8_t g = (c >> 8) & 0xFF;
+      uint8_t b = (c) & 0xFF;
+      sprintf(buf, "#%02X%02X%02X", r, g, b);
+      out += "\""; out += buf; out += "\",";
+    }
+  }
+  if (out[out.length()-1] == ',') out.remove(out.length()-1);
+  out += "]}";
+  return out;
 }
