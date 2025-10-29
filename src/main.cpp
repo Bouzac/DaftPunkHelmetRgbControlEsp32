@@ -5,6 +5,10 @@
 #include <Adafruit_NeoMatrix.h>
 #include <Adafruit_NeoPixel.h>
 #include <Preferences.h>
+#include <NimBLEDevice.h>
+
+// Forward declaration(s)
+String longToHex(long val);
 
 // ==== Constants for Modes ====
 enum ModeType { MODE_TEXT = 0, MODE_LIGHTING = 1 };
@@ -46,6 +50,25 @@ Adafruit_NeoPixel stripRight = Adafruit_NeoPixel(STRIP_LENGTH, STRIP_RIGHT_PIN, 
 WebServer server(80);
 Preferences preferences;
 
+// ==== BLE (GATT) ==== 
+// Custom Service and Characteristics UUIDs (documented for Flutter app)
+// Service: LED Control
+static const char* BLE_SVC_LEDCTRL = "12345678-1234-5678-1234-56789abcdef0";
+// Characteristics
+static const char* BLE_CH_MODE       = "12345678-1234-5678-1234-56789abcdef1"; // uint8: 0=text,1=lighting
+static const char* BLE_CH_SUBMODE    = "12345678-1234-5678-1234-56789abcdef2"; // uint8
+static const char* BLE_CH_BRIGHT     = "12345678-1234-5678-1234-56789abcdef3"; // uint8 1..255
+static const char* BLE_CH_TEXTSPD    = "12345678-1234-5678-1234-56789abcdef4"; // uint16 (ms)
+static const char* BLE_CH_EFFSPD     = "12345678-1234-5678-1234-56789abcdef5"; // uint16 (ms)
+static const char* BLE_CH_COLOR      = "12345678-1234-5678-1234-56789abcdef6"; // 3 bytes RGB
+static const char* BLE_CH_TEXT       = "12345678-1234-5678-1234-56789abcdef7"; // UTF-8 text (<=180 bytes recommended)
+
+NimBLEServer* bleServer = nullptr;
+NimBLEService* bleService = nullptr;
+NimBLECharacteristic *chMode = nullptr, *chSub = nullptr, *chBright = nullptr,
+                     *chTxtSpd = nullptr, *chEffSpd = nullptr, *chColor = nullptr,
+                     *chText = nullptr;
+
 String message = "HELLO WORLD!  ";
 int textScrollSpeed = 70; // Text scroll speed (non-blocking delay)
 int effectSpeed = 70;     // Lighting effect delay
@@ -58,7 +81,91 @@ int subMode = 0;                // Which text or lighting sub-mode
 // Non-blocking frame pacing
 unsigned long lastFrameAt = 0;
 
+// BLE write callback helper
+class CharWriteCB : public NimBLECharacteristicCallbacks {
+public:
+  enum Target { T_MODE, T_SUBMODE, T_BRIGHT, T_TEXTSPD, T_EFFSPD, T_COLOR, T_TEXT };
+  explicit CharWriteCB(Target t) : target(t) {}
+  void onWrite(NimBLECharacteristic* c) override {
+    std::string v = c->getValue();
+    if (v.empty()) return;
+    switch (target) {
+      case T_MODE: {
+        uint8_t m = (uint8_t)v[0];
+        if (m > 1) m = 0;
+        if ((ModeType)m != modeType) {
+          modeType = (ModeType)m;
+          subMode = 0;
+          preferences.putInt("type", (int)modeType);
+          preferences.putInt("sub", subMode);
+        }
+        break;
+      }
+      case T_SUBMODE: {
+        uint8_t s = (uint8_t)v[0];
+        subMode = s;
+        preferences.putInt("sub", subMode);
+        break;
+      }
+      case T_BRIGHT: {
+        uint8_t b = (uint8_t)v[0];
+        if (b == 0) b = 1;
+        brightness = b;
+        matrix.setBrightness(brightness);
+        stripLeft.setBrightness(brightness);
+        stripRight.setBrightness(brightness);
+        preferences.putInt("bright", brightness);
+        break;
+      }
+      case T_TEXTSPD: {
+        if (v.size() >= 2) {
+          uint16_t spd = (uint8_t)v[0] | ((uint8_t)v[1] << 8);
+          spd = constrain(spd, 10, 1500);
+          textScrollSpeed = spd;
+          preferences.putInt("txtspd", textScrollSpeed);
+        }
+        break;
+      }
+      case T_EFFSPD: {
+        if (v.size() >= 2) {
+          uint16_t spd = (uint8_t)v[0] | ((uint8_t)v[1] << 8);
+          spd = constrain(spd, 10, 1500);
+          effectSpeed = spd;
+          preferences.putInt("effspd", effectSpeed);
+        }
+        break;
+      }
+      case T_COLOR: {
+        // Expect 3 bytes: R,G,B
+        if (v.size() >= 3) {
+          uint8_t r = (uint8_t)v[0];
+          uint8_t g = (uint8_t)v[1];
+          uint8_t b = (uint8_t)v[2];
+          textColor = matrix.Color(r, g, b);
+          long colorVal = ((long)r << 16) | ((long)g << 8) | b;
+          colorHex = longToHex(colorVal);
+          preferences.putLong("color", colorVal);
+        }
+        break;
+      }
+      case T_TEXT: {
+        // set message with two spaces at end for scroll gap
+        String s = String(v.c_str());
+        s.trim();
+        if (s.length() > 180) s = s.substring(0, 180);
+        message = s + "  ";
+        preferences.putString("msg", message);
+        break;
+      }
+    }
+  }
+private:
+  Target target;
+};
+
 // ==== Helper (Color Conversion) ====
+// Forward declaration
+String longToHex(long val);
 // Convert a 0xRRGGBB long to a "#RRGGBB" String
 String longToHex(long val) {
   char buffer[8];
@@ -455,6 +562,50 @@ void setup() {
   server.begin();
   Serial.println("Web server ready!");
   Serial.println(WiFi.localIP());
+
+  // ===== BLE init =====
+  NimBLEDevice::init("DaftPunkHelmet");
+  bleServer = NimBLEDevice::createServer();
+  bleService = bleServer->createService(BLE_SVC_LEDCTRL);
+
+  chMode   = bleService->createCharacteristic(BLE_CH_MODE,    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+  chSub    = bleService->createCharacteristic(BLE_CH_SUBMODE, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+  chBright = bleService->createCharacteristic(BLE_CH_BRIGHT,  NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+  chTxtSpd = bleService->createCharacteristic(BLE_CH_TEXTSPD, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+  chEffSpd = bleService->createCharacteristic(BLE_CH_EFFSPD,  NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+  chColor  = bleService->createCharacteristic(BLE_CH_COLOR,   NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+  chText   = bleService->createCharacteristic(BLE_CH_TEXT,    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+
+  chMode->setCallbacks(new CharWriteCB(CharWriteCB::T_MODE));
+  chSub->setCallbacks(new CharWriteCB(CharWriteCB::T_SUBMODE));
+  chBright->setCallbacks(new CharWriteCB(CharWriteCB::T_BRIGHT));
+  chTxtSpd->setCallbacks(new CharWriteCB(CharWriteCB::T_TEXTSPD));
+  chEffSpd->setCallbacks(new CharWriteCB(CharWriteCB::T_EFFSPD));
+  chColor->setCallbacks(new CharWriteCB(CharWriteCB::T_COLOR));
+  chText->setCallbacks(new CharWriteCB(CharWriteCB::T_TEXT));
+
+  // Set initial values
+  uint8_t m = (uint8_t)modeType; chMode->setValue(&m, 1);
+  uint8_t s = (uint8_t)subMode;  chSub->setValue(&s, 1);
+  uint8_t b = (uint8_t)brightness; chBright->setValue(&b, 1);
+  uint16_t ts = (uint16_t)textScrollSpeed; chTxtSpd->setValue((uint8_t*)&ts, 2);
+  uint16_t es = (uint16_t)effectSpeed;     chEffSpd->setValue((uint8_t*)&es, 2);
+  uint8_t rgb[3] = { (uint8_t)((preferences.getLong("color", 0xFF6400) >> 16) & 0xFF), (uint8_t)((preferences.getLong("color", 0xFF6400) >> 8) & 0xFF), (uint8_t)(preferences.getLong("color", 0xFF6400) & 0xFF) };
+  chColor->setValue(rgb, 3);
+  chText->setValue(message.c_str());
+
+  bleService->start();
+  // Increase ATT MTU to allow larger text packets and improve throughput
+  NimBLEDevice::setMTU(247);
+
+  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+  adv->addServiceUUID(BLE_SVC_LEDCTRL);
+  adv->setScanResponse(true);
+  // Make advertising more discoverable (intervals in 0.625ms units)
+  adv->setMinInterval(160); // ~100 ms
+  adv->setMaxInterval(240); // ~150 ms
+  adv->start();
+  Serial.println("BLE ready! Advertised as DaftPunkHelmet");
 }
 
 // ==== LOOP (OPTIMIZED, non-blocking) ====
