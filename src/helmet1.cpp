@@ -1,5 +1,3 @@
-#include <WiFiManager.h>
-#include <WebServer.h>
 #include <Adafruit_GFX.h>
 #include <Fonts/Picopixel.h>
 #include <Adafruit_NeoMatrix.h>
@@ -47,9 +45,6 @@ Adafruit_NeoMatrix matrix = Adafruit_NeoMatrix(
 Adafruit_NeoPixel stripLeft = Adafruit_NeoPixel(STRIP_LENGTH, STRIP_LEFT_PIN, NEO_GRB + NEO_KHZ800);
 Adafruit_NeoPixel stripRight = Adafruit_NeoPixel(STRIP_LENGTH, STRIP_RIGHT_PIN, NEO_GRB + NEO_KHZ800);
 
-
-// ==== Globals ====
-WebServer server(80);
 Preferences preferences;
 
 // ==== BLE (GATT) ==== 
@@ -527,13 +522,6 @@ void setup() {
   modeType = (ModeType)preferences.getInt("type", MODE_TEXT);
   subMode = preferences.getInt("sub", 0);
 
-  // Wi-Fi for web debug UI
-  WiFiManager wm;
-  wm.setConfigPortalTimeout(180);
-  if (!wm.autoConnect("LED_Controller")) {
-    ESP.restart();
-  }
-
   matrix.begin();
   stripLeft.begin();
   stripRight.begin();
@@ -543,14 +531,6 @@ void setup() {
   matrix.setBrightness(brightness);
   stripLeft.setBrightness(brightness);
   stripRight.setBrightness(brightness);
-  // Web debug routes
-  server.on("/", [](){ server.send(200, "text/html", FPSTR(DEBUG_PAGE)); });
-  server.on("/frame", [](){
-    String j = frameJson();
-    server.send(200, "application/json", j);
-  });
-  server.begin();
-  Serial.print("Web debug UI at http://"); Serial.println(WiFi.localIP());
 
   // ===== BLE init =====
   NimBLEDevice::init("DaftPunkHelmetA");
@@ -599,8 +579,6 @@ void setup() {
 
 // ==== LOOP (OPTIMIZED, non-blocking) ====
 void loop() {
-  // Handle web debug requests
-  server.handleClient();
 
   unsigned long now = millis();
   int frameDelay = (modeType == MODE_TEXT) ? textScrollSpeed : effectSpeed;
