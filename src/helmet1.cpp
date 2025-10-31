@@ -553,7 +553,7 @@ void setup() {
   Serial.print("Web debug UI at http://"); Serial.println(WiFi.localIP());
 
   // ===== BLE init =====
-  NimBLEDevice::init("DaftPunkHelmet");
+  NimBLEDevice::init("DaftPunkHelmetA");
   bleServer = NimBLEDevice::createServer();
   bleService = bleServer->createService(BLE_SVC_LEDCTRL);
 
@@ -594,7 +594,7 @@ void setup() {
   adv->setMinInterval(160); // ~100 ms
   adv->setMaxInterval(240); // ~150 ms
   adv->start();
-  Serial.println("BLE ready! Advertised as DaftPunkHelmet");
+  Serial.println("BLE ready! Advertised as DaftPunkHelmetA");
 }
 
 // ==== LOOP (OPTIMIZED, non-blocking) ====
