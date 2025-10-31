@@ -88,7 +88,7 @@ class CharWriteCB : public NimBLECharacteristicCallbacks {
 public:
   enum Target { T_MODE, T_SUBMODE, T_BRIGHT, T_TEXTSPD, T_EFFSPD, T_COLOR, T_TEXT };
   explicit CharWriteCB(Target t) : target(t) {}
-  void onWrite(NimBLECharacteristic* c) override {
+  void onWrite(NimBLECharacteristic* c) {
     std::string v = c->getValue();
     if (v.empty()) return;
     switch (target) {
@@ -589,7 +589,7 @@ void setup() {
 
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
   adv->addServiceUUID(BLE_SVC_LEDCTRL);
-  adv->setScanResponse(true);
+  // adv->setScanResponse(true);
   // Make advertising more discoverable (intervals in 0.625ms units)
   adv->setMinInterval(160); // ~100 ms
   adv->setMaxInterval(240); // ~150 ms
