@@ -183,8 +183,8 @@ uint16_t Wheel(byte pos) {
 }
 
 // ==== Serial Matrix Simulation (ASCII/ANSI color) ====
-#define ENABLE_SERIAL_SIM 0
-#define ENABLE_SERIAL_ANSI 1  // set to 0 if ANSI colors are not supported by your terminal
+#define ENABLE_SERIAL_SIM 1
+#define ENABLE_SERIAL_ANSI 0  // set to 0 if ANSI colors are not supported by your terminal
 
 // Map (x,y) to underlying NeoPixel linear index for
 // NEO_MATRIX_BOTTOM + NEO_MATRIX_RIGHT + NEO_MATRIX_ROWS + NEO_MATRIX_ZIGZAG
